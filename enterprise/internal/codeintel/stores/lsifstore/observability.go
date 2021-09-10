@@ -12,14 +12,6 @@ type operations struct {
 	clear                         *observation.Operation
 	definitions                   *observation.Operation
 	diagnostics                   *observation.Operation
-	documentationAtPosition       *observation.Operation
-	documentationDefinitions      *observation.Operation
-	documentationIDsToPathIDs     *observation.Operation
-	documentationPage             *observation.Operation
-	documentationPathIDToFilePath *observation.Operation
-	documentationPathIDToID       *observation.Operation
-	documentationPathInfo         *observation.Operation
-	documentationReferences       *observation.Operation
 	exists                        *observation.Operation
 	hover                         *observation.Operation
 	monikerResults                *observation.Operation
@@ -28,6 +20,15 @@ type operations struct {
 	ranges                        *observation.Operation
 	references                    *observation.Operation
 	stencil                       *observation.Operation
+	implementations               *observation.Operation
+	documentationPage             *observation.Operation
+	documentationPathInfo         *observation.Operation
+	documentationIDsToPathIDs     *observation.Operation
+	documentationPathIDToID       *observation.Operation
+	documentationPathIDToFilePath *observation.Operation
+	documentationDefinitions      *observation.Operation
+	documentationReferences       *observation.Operation
+	documentationAtPosition       *observation.Operation
 	writeDefinitions              *observation.Operation
 	writeDocumentationMappings    *observation.Operation
 	writeDocumentationPages       *observation.Operation
@@ -72,14 +73,6 @@ func newOperations(observationContext *observation.Context) *operations {
 		clear:                         op("Clear"),
 		definitions:                   op("Definitions"),
 		diagnostics:                   op("Diagnostics"),
-		documentationAtPosition:       op("DocumentationAtPosition"),
-		documentationDefinitions:      op("DocumentationDefinitions"),
-		documentationIDsToPathIDs:     op("DocumentationIDsToPathIDs"),
-		documentationPage:             op("DocumentationPage"),
-		documentationPathIDToFilePath: op("DocumentationPathIDToFilePath"),
-		documentationPathIDToID:       op("DocumentationPathIDToID"),
-		documentationPathInfo:         op("DocumentationPathInfo"),
-		documentationReferences:       op("DocumentationReferences"),
 		exists:                        op("Exists"),
 		hover:                         op("Hover"),
 		monikerResults:                op("MonikerResults"),
@@ -88,6 +81,15 @@ func newOperations(observationContext *observation.Context) *operations {
 		ranges:                        op("Ranges"),
 		references:                    op("References"),
 		stencil:                       op("Stencil"),
+		implementations:               op("Implementations"),
+		documentationPage:             op("DocumentationPage"),
+		documentationPathInfo:         op("DocumentationPathInfo"),
+		documentationIDsToPathIDs:     op("DocumentationIDsToPathIDs"),
+		documentationPathIDToID:       op("DocumentationPathIDToID"),
+		documentationPathIDToFilePath: op("DocumentationPathIDToFilePath"),
+		documentationDefinitions:      op("DocumentationDefinitions"),
+		documentationReferences:       op("DocumentationReferences"),
+		documentationAtPosition:       op("DocumentationAtPosition"),
 		writeDefinitions:              op("WriteDefinitions"),
 		writeDocumentationMappings:    op("WriteDocumentationMappings"),
 		writeDocumentationPages:       op("WriteDocumentationPages"),
