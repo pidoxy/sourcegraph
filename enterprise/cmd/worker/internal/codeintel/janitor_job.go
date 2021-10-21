@@ -82,6 +82,9 @@ func (j *janitorJob) Routines(ctx context.Context) ([]goroutine.BackgroundRoutin
 		janitor.NewIndexResetter(indexWorkerStore, janitorConfigInst.CleanupTaskInterval, metrics, observationContext),
 		janitor.NewDependencyIndexResetter(dependencyIndexingStore, janitorConfigInst.CleanupTaskInterval, metrics, observationContext),
 
+		// Matcher
+		janitor.NewRepositoryPatternMatcher(dbStoreShim, lsifStore, janitorConfigInst.CleanupTaskInterval, metrics),
+
 		executorMetricsReporter,
 	}
 
