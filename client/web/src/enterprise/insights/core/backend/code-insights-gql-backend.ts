@@ -1,18 +1,21 @@
 import { ApolloClient, gql } from '@apollo/client'
 import { Duration } from 'date-fns'
 import { from, Observable, of, throwError } from 'rxjs'
+import { map } from 'rxjs/operators'
 import { LineChartContent, PieChartContent } from 'sourcegraph'
 
 import { ViewContexts } from '@sourcegraph/shared/src/api/extension/extensionHostApi'
+import { fromObservableQuery } from '@sourcegraph/shared/src/graphql/apollo'
 import { isDefined } from '@sourcegraph/shared/src/util/types'
 
 import {
     CreateInsightResult,
+    GetInsightResult,
     LineChartSearchInsightDataSeriesInput,
     LineChartSearchInsightInput,
     TimeIntervalStepUnit,
 } from '../../../../graphql-operations'
-import { InsightType, isSearchBasedInsight, SearchBasedInsight } from '../types'
+import { Insight, InsightType, InsightTypePrefix, isSearchBasedInsight, SearchBasedInsight } from '../types'
 import { isSearchBackendBasedInsight } from '../types/insight/search-insight'
 import { SupportedInsightSubject } from '../types/subjects'
 
@@ -37,11 +40,16 @@ function getStepInterval(insight: SearchBasedInsight): [TimeIntervalStepUnit, nu
     const castUnits = (Object.keys(insight.step) as (keyof Duration)[])
         .map<[TimeIntervalStepUnit, number] | null>(key => {
             switch (key) {
-                case 'hours': return [TimeIntervalStepUnit.HOUR, insight.step[key] ?? 0]
-                case 'days': return [TimeIntervalStepUnit.DAY, insight.step[key] ?? 0]
-                case 'weeks': return [TimeIntervalStepUnit.WEEK, insight.step[key] ?? 0]
-                case 'months': return [TimeIntervalStepUnit.MONTH, insight.step[key] ?? 0]
-                case 'years': return [TimeIntervalStepUnit.YEAR, insight.step[key] ?? 0]
+                case 'hours':
+                    return [TimeIntervalStepUnit.HOUR, insight.step[key] ?? 0]
+                case 'days':
+                    return [TimeIntervalStepUnit.DAY, insight.step[key] ?? 0]
+                case 'weeks':
+                    return [TimeIntervalStepUnit.WEEK, insight.step[key] ?? 0]
+                case 'months':
+                    return [TimeIntervalStepUnit.MONTH, insight.step[key] ?? 0]
+                case 'years':
+                    return [TimeIntervalStepUnit.YEAR, insight.step[key] ?? 0]
             }
 
             return null
@@ -57,12 +65,57 @@ function getStepInterval(insight: SearchBasedInsight): [TimeIntervalStepUnit, nu
 }
 
 export class CodeInsightsGqlBackend implements CodeInsightsBackend {
-
     constructor(private apolloClient: ApolloClient<object>) {}
 
     // Insights
     public getInsights = errorMockMethod('getInsights')
-    public getInsightById = errorMockMethod('getInsightById')
+
+    public getInsightById = (id: string): Observable<Insight | null> =>
+        fromObservableQuery(
+            this.apolloClient.watchQuery<GetInsightResult>({
+                query: gql`
+                    query GetInsight($ids: [ID!]) {
+                        insights(ids: $ids) {
+                            nodes {
+                                id
+                                title
+                                series {
+                                    label
+                                }
+                            }
+                        }
+                    }
+                `,
+                variables: { ids: [id] },
+            })
+        ).pipe(
+            map(result => {
+                const { data } = result
+                const insightData = data.insights?.nodes[0]
+
+                if (!insightData) {
+                    return null
+                }
+
+                // TODO [VK] Support lang stats insight
+                // TODO [VK] Support different type of insight backend based and FE insight
+                return {
+                    type: InsightType.Backend,
+                    // This is our convenstion around insight id, by this id prefix
+                    // we make a difference between search and lang stats insight
+                    id: `${InsightTypePrefix.search}.${insightData.id}`,
+                    visibility: '',
+                    title: insightData.title,
+                    series: insightData.series.map(series => ({
+                        name: series.label,
+                        // TODO [VK] we don't have series query and color in gql API but we should add this
+                        query: '',
+                        stroke: '',
+                    })),
+                }
+            })
+        )
+
     public findInsightByName = errorMockMethod('findInsightByName')
     public getReachableInsights = errorMockMethod('getReachableInsights')
     public getBackendInsightData = errorMockMethod('getBackendInsightData')
@@ -78,11 +131,8 @@ export class CodeInsightsGqlBackend implements CodeInsightsBackend {
         const { insight, dashboard } = input
 
         if (isSearchBasedInsight(insight)) {
-
             // Prepare repository insight array
-            const repositories = !isSearchBackendBasedInsight(insight)
-                ? insight.repositories
-                : []
+            const repositories = !isSearchBackendBasedInsight(insight) ? insight.repositories : []
 
             const [unit, value] = getStepInterval(insight)
             const input: LineChartSearchInsightInput = {
@@ -90,34 +140,36 @@ export class CodeInsightsGqlBackend implements CodeInsightsBackend {
                     query: series.query,
                     options: {
                         label: series.name,
-                        lineColor: series.stroke
+                        lineColor: series.stroke,
                     },
                     repositoryScope: { repositories },
-                    timeScope: { stepInterval: { unit, value } }
+                    timeScope: { stepInterval: { unit, value } },
                 })),
-                options: { title: insight.title }
+                options: { title: insight.title },
             }
 
-            return from((async () => {
-                const { data } = await this.apolloClient.mutate<CreateInsightResult>({
-                    mutation: gql`
-                        mutation CreateInsight($input: LineChartSearchInsightInput!) {
-                            createLineChartSearchInsight(input: $input) {
-                                view {
-                                    id
+            return from(
+                (async () => {
+                    const { data } = await this.apolloClient.mutate<CreateInsightResult>({
+                        mutation: gql`
+                            mutation CreateInsight($input: LineChartSearchInsightInput!) {
+                                createLineChartSearchInsight(input: $input) {
+                                    view {
+                                        id
+                                    }
                                 }
                             }
-                        }
-                    `,
-                    variables: { input }
-                })
+                        `,
+                        variables: { input },
+                    })
 
-                // TODO [VK] add attach to dashboard API call with newly create id and dashboard id
-                const insightId = data?.createLineChartSearchInsight.view.id ?? ''
-                const dashboardId = dashboard?.id ?? ''
+                    // TODO [VK] add attach to dashboard API call with newly create id and dashboard id
+                    const insightId = data?.createLineChartSearchInsight.view.id ?? ''
+                    const dashboardId = dashboard?.id ?? ''
 
-                console.log(`Add insight with id ${insightId} to dashboard with id ${dashboardId}`)
-            })())
+                    console.log(`Add insight with id ${insightId} to dashboard with id ${dashboardId}`)
+                })()
+            )
         }
 
         // TODO [VK] implement lang stats chart creation

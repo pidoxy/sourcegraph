@@ -1,3 +1,4 @@
+import { useApolloClient } from '@apollo/client'
 import MapSearchIcon from 'mdi-react/MapSearchIcon'
 import React, { useMemo } from 'react'
 import { RouteComponentProps, Switch, Route, useRouteMatch } from 'react-router'
@@ -48,17 +49,17 @@ export const InsightsRouter = withAuthenticatedUser<InsightsRouterProps>(props =
     const { platformContext, settingsCascade, telemetryService, authenticatedUser } = props
 
     const match = useRouteMatch()
+    const apolloClient = useApolloClient()
 
     const api = useMemo(() => {
         // Disabled by default condition
         const isNewGqlApiEnabled =
-            !isErrorLike(settingsCascade.final) &&
-            settingsCascade.final?.experimentalFeatures?.codeInsightsGqlApi
+            !isErrorLike(settingsCascade.final) && settingsCascade.final?.experimentalFeatures?.codeInsightsGqlApi
 
         return isNewGqlApiEnabled
-            ? new CodeInsightsGqlBackend()
+            ? new CodeInsightsGqlBackend(apolloClient)
             : new CodeInsightsSettingsCascadeBackend(settingsCascade, platformContext)
-    }, [platformContext, settingsCascade])
+    }, [platformContext, settingsCascade, apolloClient])
 
     return (
         <CodeInsightsBackendContext.Provider value={api}>
