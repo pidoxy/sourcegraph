@@ -369,37 +369,15 @@ func (s *Store) DocumentationSearch(ctx context.Context, tableSuffix, query stri
 	}})
 	defer endObservation(1, observation.Args{})
 
-	// First, we split the query at the first colon if there is one. We support two syntaxes:
-	//
-	// 	<metadata>:<query terms>
-	// 	<query terms and metadata>
-	//
-	// That is, if the user jumbling all the query terms and metadata (repo names, tags, language name, etc.)
-	// into the query does not yield good results, they can prefix their query with metadata and a colon, for
-	// queries like:
-	//
-	// 	golang/go: net/http
-	// 	go package: mux
-	// 	go private variable my/repo: mux
-	//
-	// This is a stupid-simple form for people to get more specific results.
-	metaQuery := query
-	mainQuery := query
-	if i := strings.Index(query, ":"); i != -1 {
-		metaQuery = strings.TrimSpace(query[:i])
-		mainQuery = strings.TrimSpace(query[i+len(":"):])
-	}
+	q := apidocs.ParseQuery(query)
 
-	// whether or not lexemes should match substrings. e.g. should "gith.com/sourcegraph/source"
-	// be matched as "*gith*.*com*/*sourcegraph*/*source*".
-	subStringMatches := true
-	langRepoTagsClause := apidocs.TextSearchQuery("tsv", metaQuery, subStringMatches)
+	langRepoTagsClause := apidocs.TextSearchQuery("tsv", q.MetaTerms, q.SubStringMatches)
 
 	var primaryClauses []*sqlf.Query
-	primaryClauses = append(primaryClauses, apidocs.TextSearchQuery("result.search_key_tsv", mainQuery, subStringMatches))
-	primaryClauses = append(primaryClauses, apidocs.TextSearchQuery("result.search_key_reverse_tsv", apidocs.Reverse(mainQuery), subStringMatches))
-	primaryClauses = append(primaryClauses, apidocs.TextSearchQuery("result.label_tsv", mainQuery, subStringMatches))
-	primaryClauses = append(primaryClauses, apidocs.TextSearchQuery("result.label_reverse_tsv", apidocs.Reverse(mainQuery), subStringMatches))
+	primaryClauses = append(primaryClauses, apidocs.TextSearchQuery("result.search_key_tsv", q.MainTerms, q.SubStringMatches))
+	primaryClauses = append(primaryClauses, apidocs.TextSearchQuery("result.search_key_reverse_tsv", apidocs.Reverse(q.MainTerms), q.SubStringMatches))
+	primaryClauses = append(primaryClauses, apidocs.TextSearchQuery("result.label_tsv", q.MainTerms, q.SubStringMatches))
+	primaryClauses = append(primaryClauses, apidocs.TextSearchQuery("result.label_reverse_tsv", apidocs.Reverse(q.MainTerms), q.SubStringMatches))
 
 	return s.scanDocumentationSearchResults(s.Store.Query(ctx, sqlf.Sprintf(
 		strings.ReplaceAll(documentationSearchQuery, "$SUFFIX", tableSuffix),
@@ -407,10 +385,10 @@ func (s *Store) DocumentationSearch(ctx context.Context, tableSuffix, query stri
 		langRepoTagsClause, // matching_repo_names CTE WHERE conditions
 		langRepoTagsClause, // matching_tags CTE WHERE conditions
 
-		apidocs.TextSearchRank("result.search_key_tsv", mainQuery, subStringMatches),                          // search_key_rank
-		apidocs.TextSearchRank("result.search_key_reverse_tsv", apidocs.Reverse(mainQuery), subStringMatches), // search_key_reverse_rank
-		apidocs.TextSearchRank("result.label_tsv", mainQuery, subStringMatches),                               // label_rank
-		apidocs.TextSearchRank("result.label_reverse_tsv", apidocs.Reverse(mainQuery), subStringMatches),      // label_reverse_rank
+		apidocs.TextSearchRank("result.search_key_tsv", q.MainTerms, q.SubStringMatches),                          // search_key_rank
+		apidocs.TextSearchRank("result.search_key_reverse_tsv", apidocs.Reverse(q.MainTerms), q.SubStringMatches), // search_key_reverse_rank
+		apidocs.TextSearchRank("result.label_tsv", q.MainTerms, q.SubStringMatches),                               // label_rank
+		apidocs.TextSearchRank("result.label_reverse_tsv", apidocs.Reverse(q.MainTerms), q.SubStringMatches),      // label_reverse_rank
 
 		sqlf.Join(primaryClauses, " OR "), // primary WHERE clause
 		100,                               // result limit
