@@ -393,13 +393,13 @@ func (s *Store) DocumentationSearch(ctx context.Context, tableSuffix, query stri
 	// whether or not lexemes should match substrings. e.g. should "gith.com/sourcegraph/source"
 	// be matched as "*gith*.*com*/*sourcegraph*/*source*".
 	subStringMatches := true
-	langRepoTagsClause := textSearchQuery("tsv", metaQuery, subStringMatches)
+	langRepoTagsClause := apidocs.TextSearchQuery("tsv", metaQuery, subStringMatches)
 
 	var primaryClauses []*sqlf.Query
-	primaryClauses = append(primaryClauses, textSearchQuery("result.search_key_tsv", mainQuery, subStringMatches))
-	primaryClauses = append(primaryClauses, textSearchQuery("result.search_key_reverse_tsv", apidocs.Reverse(mainQuery), subStringMatches))
-	primaryClauses = append(primaryClauses, textSearchQuery("result.label_tsv", mainQuery, subStringMatches))
-	primaryClauses = append(primaryClauses, textSearchQuery("result.label_reverse_tsv", apidocs.Reverse(mainQuery), subStringMatches))
+	primaryClauses = append(primaryClauses, apidocs.TextSearchQuery("result.search_key_tsv", mainQuery, subStringMatches))
+	primaryClauses = append(primaryClauses, apidocs.TextSearchQuery("result.search_key_reverse_tsv", apidocs.Reverse(mainQuery), subStringMatches))
+	primaryClauses = append(primaryClauses, apidocs.TextSearchQuery("result.label_tsv", mainQuery, subStringMatches))
+	primaryClauses = append(primaryClauses, apidocs.TextSearchQuery("result.label_reverse_tsv", apidocs.Reverse(mainQuery), subStringMatches))
 
 	return s.scanDocumentationSearchResults(s.Store.Query(ctx, sqlf.Sprintf(
 		strings.ReplaceAll(documentationSearchQuery, "$SUFFIX", tableSuffix),
@@ -407,67 +407,14 @@ func (s *Store) DocumentationSearch(ctx context.Context, tableSuffix, query stri
 		langRepoTagsClause, // matching_repo_names CTE WHERE conditions
 		langRepoTagsClause, // matching_tags CTE WHERE conditions
 
-		textSearchRank("result.search_key_tsv", mainQuery, subStringMatches),                          // search_key_rank
-		textSearchRank("result.search_key_reverse_tsv", apidocs.Reverse(mainQuery), subStringMatches), // search_key_reverse_rank
-		textSearchRank("result.label_tsv", mainQuery, subStringMatches),                               // label_rank
-		textSearchRank("result.label_reverse_tsv", apidocs.Reverse(mainQuery), subStringMatches),      // label_reverse_rank
+		apidocs.TextSearchRank("result.search_key_tsv", mainQuery, subStringMatches),                          // search_key_rank
+		apidocs.TextSearchRank("result.search_key_reverse_tsv", apidocs.Reverse(mainQuery), subStringMatches), // search_key_reverse_rank
+		apidocs.TextSearchRank("result.label_tsv", mainQuery, subStringMatches),                               // label_rank
+		apidocs.TextSearchRank("result.label_reverse_tsv", apidocs.Reverse(mainQuery), subStringMatches),      // label_reverse_rank
 
 		sqlf.Join(primaryClauses, " OR "), // primary WHERE clause
 		100,                               // result limit
 	)))
-}
-
-func textSearchRank(columnName, query string, subStringMatches bool) *sqlf.Query {
-	var rankFunctions []*sqlf.Query
-	for _, term := range strings.Fields(query) {
-		seq := lexemeSequence(term, subStringMatches)
-		rankFunctions = append(rankFunctions, sqlf.Sprintf("ts_rank_cd("+columnName+", %s, 2)", seq))
-	}
-	return sqlf.Join(rankFunctions, " + ")
-}
-
-// Note: This composing a tsquery _value_ and so using fmt.Sprintf instead of sqlf.Sprintf is
-// correct here.
-func lexemeSequence(s string, subStringmatches bool) string {
-	lexemes := apidocs.Lexemes(s)
-	sequence := make([]string, 0, len(lexemes))
-	for _, lexeme := range lexemes {
-		if subStringmatches {
-			sequence = append(sequence, fmt.Sprintf("%s:*", lexeme))
-		} else {
-			sequence = append(sequence, lexeme)
-		}
-	}
-	return strings.Join(sequence, " <-> ")
-}
-
-func textSearchQuery(columnName, query string, subStringMatches bool) *sqlf.Query {
-	// For every term in the query string, produce the lexeme sequence that would match it. e.g.
-	// "gorilla/mux Router" -> [`gorilla:* <-> /:* <-> mux:*`, `Router:*`]
-	terms := strings.Fields(query)
-	termLexemeSequences := make([]string, 0, len(terms))
-	for _, term := range terms {
-		termLexemeSequences = append(termLexemeSequences, lexemeSequence(term, subStringMatches))
-	}
-
-	// Build expressions that would match all the query terms in sequence, with some distance of
-	// lexemes between them. Note that the tsquery `foo <-> bar` matches foo _exactly_ followed by
-	// bar, and `foo <1> bar` matches _exactly_ foo followed by one lexeme and then bar. There is
-	// no way in Postgres today to specify a range of lexemes between, or a wildcard (unknown number
-	// of lexemes between). https://stackoverflow.com/a/59146601
-	//
-	// "<->" (no distance) enables exact search terms like "http.StatusNotFound" to match lexemes ['http', '.', 'StatusNotFound']
-	// "<2>" enables search terms like "http StatusNotFound" (missing period) to match lexemes ['http', '.', 'StatusNotFound']
-	// "<4>" enables search terms like "json Decode" (missing "Decoder") to match lexemes ['json', 'Decoder', 'Decode']
-	// "<5>" enables search terms like "Player Run" (missing "::") to match lexemes ['Player', ':', ':', 'Run]
-	//
-	// Note that more distance != better, the greater the distance the worse relevance of results.
-	distances := []string{" <-> ", " <2> ", " <4> ", " <5> "}
-	expressions := make([]*sqlf.Query, 0, len(distances))
-	for _, distance := range distances {
-		expressions = append(expressions, sqlf.Sprintf(columnName+" @@ %s", strings.Join(termLexemeSequences, distance)))
-	}
-	return sqlf.Join(expressions, " OR ")
 }
 
 const documentationSearchQuery = `
