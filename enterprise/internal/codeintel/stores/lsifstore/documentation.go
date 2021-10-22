@@ -12,6 +12,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/opentracing/opentracing-go/log"
 
+	"github.com/sourcegraph/sourcegraph/enterprise/internal/codeintel/stores/lsifstore/apidocs"
 	"github.com/sourcegraph/sourcegraph/internal/database/basestore"
 	"github.com/sourcegraph/sourcegraph/internal/observation"
 	"github.com/sourcegraph/sourcegraph/lib/codeintel/precise"
@@ -396,9 +397,9 @@ func (s *Store) DocumentationSearch(ctx context.Context, tableSuffix, query stri
 
 	var primaryClauses []*sqlf.Query
 	primaryClauses = append(primaryClauses, textSearchQuery("result.search_key_tsv", mainQuery, subStringMatches))
-	primaryClauses = append(primaryClauses, textSearchQuery("result.search_key_reverse_tsv", reverse(mainQuery), subStringMatches))
+	primaryClauses = append(primaryClauses, textSearchQuery("result.search_key_reverse_tsv", apidocs.Reverse(mainQuery), subStringMatches))
 	primaryClauses = append(primaryClauses, textSearchQuery("result.label_tsv", mainQuery, subStringMatches))
-	primaryClauses = append(primaryClauses, textSearchQuery("result.label_reverse_tsv", reverse(mainQuery), subStringMatches))
+	primaryClauses = append(primaryClauses, textSearchQuery("result.label_reverse_tsv", apidocs.Reverse(mainQuery), subStringMatches))
 
 	return s.scanDocumentationSearchResults(s.Store.Query(ctx, sqlf.Sprintf(
 		strings.ReplaceAll(documentationSearchQuery, "$SUFFIX", tableSuffix),
@@ -406,13 +407,13 @@ func (s *Store) DocumentationSearch(ctx context.Context, tableSuffix, query stri
 		langRepoTagsClause, // matching_repo_names CTE WHERE conditions
 		langRepoTagsClause, // matching_tags CTE WHERE conditions
 
-		textSearchRank("result.search_key_tsv", mainQuery, subStringMatches),                  // search_key_rank
-		textSearchRank("result.search_key_reverse_tsv", reverse(mainQuery), subStringMatches), // search_key_reverse_rank
-		textSearchRank("result.label_tsv", mainQuery, subStringMatches),                       // label_rank
-		textSearchRank("result.label_reverse_tsv", reverse(mainQuery), subStringMatches),      // label_reverse_rank
+		textSearchRank("result.search_key_tsv", mainQuery, subStringMatches),                          // search_key_rank
+		textSearchRank("result.search_key_reverse_tsv", apidocs.Reverse(mainQuery), subStringMatches), // search_key_reverse_rank
+		textSearchRank("result.label_tsv", mainQuery, subStringMatches),                               // label_rank
+		textSearchRank("result.label_reverse_tsv", apidocs.Reverse(mainQuery), subStringMatches),      // label_reverse_rank
 
 		sqlf.Join(primaryClauses, " OR "), // primary WHERE clause
-		100,                                // result limit
+		100,                               // result limit
 	)))
 }
 
@@ -428,7 +429,7 @@ func textSearchRank(columnName, query string, subStringMatches bool) *sqlf.Query
 // Note: This composing a tsquery _value_ and so using fmt.Sprintf instead of sqlf.Sprintf is
 // correct here.
 func lexemeSequence(s string, subStringmatches bool) string {
-	lexemes := lexemes(s)
+	lexemes := apidocs.Lexemes(s)
 	sequence := make([]string, 0, len(lexemes))
 	for _, lexeme := range lexemes {
 		if subStringmatches {
@@ -464,7 +465,7 @@ func textSearchQuery(columnName, query string, subStringMatches bool) *sqlf.Quer
 	distances := []string{" <-> ", " <2> ", " <4> ", " <5> "}
 	expressions := make([]*sqlf.Query, 0, len(distances))
 	for _, distance := range distances {
-		expressions = append(expressions, sqlf.Sprintf(columnName+ " @@ %s", strings.Join(termLexemeSequences, distance)))
+		expressions = append(expressions, sqlf.Sprintf(columnName+" @@ %s", strings.Join(termLexemeSequences, distance)))
 	}
 	return sqlf.Join(expressions, " OR ")
 }
@@ -593,8 +594,8 @@ func (s *Store) scanDocumentationSearchResults(rows *sql.Rows, queryErr error) (
 	var results []precise.DocumentationSearchResult
 	for rows.Next() {
 		var (
-			result                   precise.DocumentationSearchResult
-			tags                     string
+			result precise.DocumentationSearchResult
+			tags   string
 		)
 		if err := rows.Scan(
 			&result.ID,
