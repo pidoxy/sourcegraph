@@ -395,10 +395,10 @@ func (s *Store) DocumentationSearch(ctx context.Context, tableSuffix, query stri
 	langRepoTagsClause := textSearchQuery("tsv", metaQuery, subStringMatches)
 
 	var primaryClauses []*sqlf.Query
-	primaryClauses = append(primaryClauses, textSearchQuery("search_key_tsv", mainQuery, subStringMatches))
-	primaryClauses = append(primaryClauses, textSearchQuery("search_key_reverse_tsv", reverse(mainQuery), subStringMatches))
-	primaryClauses = append(primaryClauses, textSearchQuery("label_tsv", mainQuery, subStringMatches))
-	primaryClauses = append(primaryClauses, textSearchQuery("label_reverse_tsv", reverse(mainQuery), subStringMatches))
+	primaryClauses = append(primaryClauses, textSearchQuery("result.search_key_tsv", mainQuery, subStringMatches))
+	primaryClauses = append(primaryClauses, textSearchQuery("result.search_key_reverse_tsv", reverse(mainQuery), subStringMatches))
+	primaryClauses = append(primaryClauses, textSearchQuery("result.label_tsv", mainQuery, subStringMatches))
+	primaryClauses = append(primaryClauses, textSearchQuery("result.label_reverse_tsv", reverse(mainQuery), subStringMatches))
 
 	return s.scanDocumentationSearchResults(s.Store.Query(ctx, sqlf.Sprintf(
 		strings.ReplaceAll(documentationSearchQuery, "$SUFFIX", tableSuffix),
@@ -406,13 +406,13 @@ func (s *Store) DocumentationSearch(ctx context.Context, tableSuffix, query stri
 		langRepoTagsClause, // matching_repo_names CTE WHERE conditions
 		langRepoTagsClause, // matching_tags CTE WHERE conditions
 
-		textSearchRank("search_key_tsv", mainQuery, subStringMatches),                  // search_key_rank
-		textSearchRank("search_key_reverse_tsv", reverse(mainQuery), subStringMatches), // search_key_reverse_rank
-		textSearchRank("label_tsv", mainQuery, subStringMatches),                       // label_rank
-		textSearchRank("label_reverse_tsv", reverse(mainQuery), subStringMatches),      // label_reverse_rank
+		textSearchRank("result.search_key_tsv", mainQuery, subStringMatches),                  // search_key_rank
+		textSearchRank("result.search_key_reverse_tsv", reverse(mainQuery), subStringMatches), // search_key_reverse_rank
+		textSearchRank("result.label_tsv", mainQuery, subStringMatches),                       // label_rank
+		textSearchRank("result.label_reverse_tsv", reverse(mainQuery), subStringMatches),      // label_reverse_rank
 
 		sqlf.Join(primaryClauses, " OR "), // primary WHERE clause
-		50,                                // result limit
+		100,                                // result limit
 	)))
 }
 
@@ -441,16 +441,135 @@ func lexemeSequence(s string, subStringmatches bool) string {
 }
 
 func textSearchQuery(columnName, query string, subStringMatches bool) *sqlf.Query {
-	var expressions []*sqlf.Query
-	for _, term := range strings.Fields(query) {
-		seq := lexemeSequence(term, subStringMatches)
-		expressions = append(expressions, sqlf.Sprintf(columnName+" @@ %s", seq))
+	// For every term in the query string, produce the lexeme sequence that would match it. e.g.
+	// "gorilla/mux Router" -> [`gorilla:* <-> /:* <-> mux:*`, `Router:*`]
+	terms := strings.Fields(query)
+	termLexemeSequences := make([]string, 0, len(terms))
+	for _, term := range terms {
+		termLexemeSequences = append(termLexemeSequences, lexemeSequence(term, subStringMatches))
+	}
+
+	// Build expressions that would match all the query terms in sequence, with some distance of
+	// lexemes between them. Note that the tsquery `foo <-> bar` matches foo _exactly_ followed by
+	// bar, and `foo <1> bar` matches _exactly_ foo followed by one lexeme and then bar. There is
+	// no way in Postgres today to specify a range of lexemes between, or a wildcard (unknown number
+	// of lexemes between). https://stackoverflow.com/a/59146601
+	//
+	// "<->" (no distance) enables exact search terms like "http.StatusNotFound" to match lexemes ['http', '.', 'StatusNotFound']
+	// "<2>" enables search terms like "http StatusNotFound" (missing period) to match lexemes ['http', '.', 'StatusNotFound']
+	// "<4>" enables search terms like "json Decode" (missing "Decoder") to match lexemes ['json', 'Decoder', 'Decode']
+	// "<5>" enables search terms like "Player Run" (missing "::") to match lexemes ['Player', ':', ':', 'Run]
+	//
+	// Note that more distance != better, the greater the distance the worse relevance of results.
+	distances := []string{" <-> ", " <2> ", " <4> ", " <5> "}
+	expressions := make([]*sqlf.Query, 0, len(distances))
+	for _, distance := range distances {
+		expressions = append(expressions, sqlf.Sprintf(columnName+ " @@ %s", strings.Join(termLexemeSequences, distance)))
 	}
 	return sqlf.Join(expressions, " OR ")
 }
 
 const documentationSearchQuery = `
 -- source: enterprise/internal/codeintel/stores/lsifstore/documentation.go:DocumentationSearch
+WITH final_results AS (
+	SELECT * FROM (
+		WITH
+			-- Can we find a matching language name? If so, that could limit our search space greatly.
+			matching_lang_names AS (
+				SELECT id, lang_name
+				FROM lsif_data_docs_search_lang_names_$SUFFIX
+				WHERE %s LIMIT 1
+			),
+			-- Can we find matching repository names? If so, we'll rank results from those higher.
+			--
+			-- We don't filter on repos currently because any term matching a repo name, e.g. "go",
+			-- could accidentally restrict the search to very few repos.
+			-- TODO(slimsag): add something that "picks out" likely repo names and actually filter
+			-- on those.
+			matching_repo_names AS (
+				SELECT id, repo_name
+				FROM lsif_data_docs_search_repo_names_$SUFFIX
+				WHERE %s LIMIT 100
+			),
+			-- Can we find a matching sequence of documentation/symbol tags? e.g. "private variable".
+			-- If so, then we pick the top 10 and search only documentation nodes that have that same
+			-- sequence of tags.
+			matching_tags AS (
+				SELECT id, tags
+				FROM lsif_data_docs_search_tags_$SUFFIX
+				WHERE %s LIMIT 10
+			)
+		SELECT
+			result.id::bigint,
+			repo_id,
+			repo_id = ANY(SELECT id FROM matching_repo_names) AS from_matching_repo,
+			path_id,
+			detail,
+			search_key,
+			label,
+			lang_name AS lang_name,
+			repo_name AS repo_name,
+			tags AS tags,
+			%s AS search_key_rank,
+			%s AS search_key_reverse_rank,
+			%s AS label_rank,
+			%s AS label_reverse_rank
+		FROM lsif_data_docs_search_$SUFFIX result
+		JOIN lsif_data_docs_search_lang_names_$SUFFIX langnames ON langnames.id = result.lang_name_id
+		JOIN lsif_data_docs_search_repo_names_$SUFFIX reponames ON reponames.id = result.repo_name_id
+		JOIN lsif_data_docs_search_tags_$SUFFIX tags ON tags.id = result.tags_id
+		WHERE
+			(%s)
+
+			-- Select only results that come from the latest upload, since lsif_data_docs_search_* may
+			-- have results from multiple uploads (the table is cleaned up asynchronously in the
+			-- background to avoid lock contention at insert time.)
+			AND result.dump_id = (
+				SELECT dump_id FROM lsif_data_docs_search_current_public current
+				WHERE
+					current.dump_id = result.dump_id
+					AND current.dump_root = result.dump_root
+					AND lang_name_id = result.lang_name_id
+				ORDER BY current.created_at DESC, id
+				LIMIT 1
+			)
+
+			-- If we found matching lang names, filter to just those.
+			AND (CASE WHEN (SELECT COUNT(*) FROM matching_lang_names) > 0 THEN
+				result.lang_name_id = ANY(array(SELECT id FROM matching_lang_names))
+			ELSE result.lang_name_id IS NOT NULL END)
+
+			-- If we found matching tags, filter to just those.
+			AND (CASE WHEN (SELECT COUNT(*) FROM matching_tags) > 0 THEN
+				result.tags_id = ANY(array(SELECT id FROM matching_tags))
+			ELSE result.tags_id IS NOT NULL END)
+
+		-- maximum candidates we'll consider: the more candidates we have the better ranking we get,
+		-- but the slower searching is. See https://about.sourcegraph.com/blog/postgres-text-search-balancing-query-time-and-relevancy/
+		-- 10,000 is an arbitrary choice based on current Sourcegraph.com corpus size and performance,
+		-- it'll be tuned as we scale to more repos if perf gets worse or we find we need better
+		-- relevance.
+		LIMIT 10000
+	) sub
+	ORDER BY
+		-- Rank results from repos that match query terms higher.
+		CASE WHEN from_matching_repo THEN 1 ELSE 0 END,
+
+		-- First rank by search keys, as those are ideally super specific if you write the correct
+		-- format.
+		GREATEST(search_key_rank, search_key_reverse_rank) DESC,
+
+		-- Secondarily rank by label, e.g. function signature. These contain less specific info and
+		-- due to e.g. containing arguments a function takes, have higher chance of collision with the
+		-- desired symbol result, producing a bad match.
+		GREATEST(label_rank, label_reverse_rank) DESC,
+
+		-- If all else failed, sort by something reasonable and deterministic.
+		repo_name DESC,
+		tags DESC,
+		id DESC
+	LIMIT %s -- Maximum results we'll actually return.
+)
 SELECT
 	id,
 	repo_id,
@@ -460,86 +579,8 @@ SELECT
 	label,
 	lang_name,
 	repo_name,
-	tags,
-	search_key_rank,
-	search_key_reverse_rank,
-	label_rank,
-	label_reverse_rank
-FROM (
-    WITH
-        matching_lang_names AS (
-            SELECT id, lang_name
-            FROM lsif_data_docs_search_lang_names_$SUFFIX
-            WHERE %s LIMIT 1
-        ),
-        matching_repo_names AS (
-            SELECT id, repo_name
-            FROM lsif_data_docs_search_repo_names_$SUFFIX
-            WHERE %s LIMIT 1
-        ),
-        matching_tags AS (
-            SELECT id, tags
-            FROM lsif_data_docs_search_tags_$SUFFIX
-            WHERE %s LIMIT 1
-        )
-    SELECT
-		lsif_data_docs_search_$SUFFIX.id::bigint,
-        repo_id,
-        path_id,
-        detail,
-        search_key,
-        label,
-        lang_name,
-        repo_name,
-        tags,
-		%s AS search_key_rank,
-		%s AS search_key_reverse_rank,
-		%s AS label_rank,
-		%s AS label_reverse_rank
-    FROM lsif_data_docs_search_$SUFFIX
-    JOIN lsif_data_docs_search_lang_names_$SUFFIX ON lsif_data_docs_search_lang_names_$SUFFIX.id = lang_name_id
-    JOIN lsif_data_docs_search_repo_names_$SUFFIX ON lsif_data_docs_search_repo_names_$SUFFIX.id = repo_name_id
-    JOIN lsif_data_docs_search_tags_$SUFFIX ON lsif_data_docs_search_tags_$SUFFIX.id = tags_id
-    WHERE
-        (%s)
-
-		-- If we found matching lang names, filter to just those.
-        AND (CASE WHEN (SELECT COUNT(*) FROM matching_lang_names) > 0 THEN
-            lang_name_id = ANY(array(SELECT id FROM matching_lang_names))
-        ELSE lang_name_id IS NOT NULL END)
-
-		-- If we found matching repo names, filter to just those.
-        AND (CASE WHEN (SELECT COUNT(*) FROM matching_repo_names) > 0 THEN
-            repo_name_id = ANY(array(SELECT id FROM matching_repo_names))
-        ELSE repo_name_id IS NOT NULL END)
-
-		-- If we found matching tags, filter to just those.
-		AND (CASE WHEN (SELECT COUNT(*) FROM matching_tags) > 0 THEN
-            tags_id = ANY(array(SELECT id FROM matching_tags))
-        ELSE tags_id IS NOT NULL END)
-
-	-- maximum candidates we'll consider: the more candidates we have the better ranking we get,
-	-- but the slower searching is. See https://about.sourcegraph.com/blog/postgres-text-search-balancing-query-time-and-relevancy/
-	-- 10,000 is an arbitrary choice based on current Sourcegraph.com corpus size and performance,
-	-- it'll be tuned as we scale to more repos if perf gets worse or we find we need better
-	-- relevance.
-    LIMIT 10000
-) sub
-ORDER BY
-	-- First rank by search keys, as those are ideally super specific if you write the correct
-	-- format.
-    GREATEST(search_key_rank, search_key_reverse_rank) DESC,
-
-	-- Secondarily rank by label, e.g. function signature. These contain less specific info and
-	-- due to e.g. containing arguments a function takes, have higher chance of collision with the
-	-- desired symbol result, producing a bad match.
-    GREATEST(label_rank, label_reverse_rank) DESC,
-
-	-- If all else failed, sort by something reasonable and deterministic.
-	repo_name DESC,
-	tags DESC,
-	id DESC
-LIMIT %s -- Maximum results we'll actually return.
+	tags
+FROM final_results
 `
 
 // scanDocumentationSearchResults reads the documentation search results rows. If no rows matched, (nil, nil) is returned.
@@ -554,7 +595,6 @@ func (s *Store) scanDocumentationSearchResults(rows *sql.Rows, queryErr error) (
 		var (
 			result                   precise.DocumentationSearchResult
 			tags                     string
-			searchKeyRank, searchKeyReverseRank, labelRank, labelReverseRank float32
 		)
 		if err := rows.Scan(
 			&result.ID,
@@ -566,10 +606,6 @@ func (s *Store) scanDocumentationSearchResults(rows *sql.Rows, queryErr error) (
 			&result.Lang,
 			&result.RepoName,
 			&tags,
-			&searchKeyRank,
-			&searchKeyReverseRank,
-			&labelRank,
-			&labelReverseRank,
 		); err != nil {
 			return nil, err
 		}
