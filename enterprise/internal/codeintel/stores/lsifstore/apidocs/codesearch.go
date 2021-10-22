@@ -223,7 +223,8 @@ func ParseQuery(query string) Query {
 
 // Query describes an API docs search query.
 type Query struct {
-	// MetaTerms are the terms that should be matched against tags, repo names, and language name metadata.
+	// MetaTerms are the terms that should be matched against tags, repo names, and language name
+	// metadata.
 	MetaTerms string
 
 	// MainTerms are the terms that should be matched against the search key and label.
@@ -239,16 +240,17 @@ type Query struct {
 // 	<metadata>:<query terms>
 // 	<query terms and metadata>
 //
-// That is, if the user jumbling all the query terms and metadata (repo names, tags, language name, etc.)
-// into the query does not yield good results, they can prefix their query with metadata and a colon, for
-// queries like:
+// That is, if the user jumbling all the query terms and metadata (repo names, tags, language name,
+// etc.) into the query does not yield good results, they can prefix their query with metadata and
+// a colon, for queries like:
 //
 // 	golang/go: net/http
 // 	go package: mux
 // 	go private variable my/repo: mux
 //
-// This is a stupid-simple form for people to get more specific results, and likely the only
-// "advanced" syntax API docs search will ever support.
+// This is a stupid-simple form for people to get more specific results, and may be the only
+// "advanced" syntax API docs search will ever support because we want it to have stupid simple
+/// syntax.
 func ParseQuery(query string) Query {
 	q := Query{
 		MetaTerms: query,

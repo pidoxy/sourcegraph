@@ -391,7 +391,7 @@ func (s *Store) DocumentationSearch(ctx context.Context, tableSuffix, query stri
 		apidocs.TextSearchRank("result.label_reverse_tsv", apidocs.Reverse(q.MainTerms), q.SubStringMatches),      // label_reverse_rank
 
 		sqlf.Join(primaryClauses, " OR "), // primary WHERE clause
-		100,                               // result limit
+		q.Limit,                               // result limit
 	)))
 }
 
